@@ -511,10 +511,6 @@ function convertSub2ApiOpenAIAccount(account, options) {
     throw new Error("credentials.access_token 为空");
   }
 
-  if (!refreshToken) {
-    throw new Error("credentials.refresh_token 为空，无法生成 Codex CPA 文件");
-  }
-
   if (!idToken) {
     throw new Error("credentials.id_token 为空，无法生成 Codex CPA 文件");
   }
