@@ -22,6 +22,14 @@ function decodeBase64Url(value) {
   return Buffer.from(padded, "base64").toString("utf8");
 }
 
+function encodeBase64Url(str) {
+  if (typeof btoa === "function") {
+    return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  }
+
+  return Buffer.from(str).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
 export function parseJwtPayload(token) {
   if (typeof token !== "string" || token.trim() === "") {
     return undefined;
@@ -260,6 +268,29 @@ function buildCommonExtra(record, email) {
     email_key: toEmailKey(email),
     last_refresh: normalizeFlexibleTimestamp(record.last_refresh),
   });
+}
+
+function generateSyntheticIdToken(accessPayload, expiresAt, email, now) {
+  const iat = Math.floor(now.getTime() / 1000);
+  const exp = expiresAt ? Math.floor(new Date(expiresAt).getTime() / 1000) : iat + 86400;
+
+  const payload = {
+    iat,
+    exp,
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: accessPayload?.["https://api.openai.com/auth"]?.chatgpt_account_id,
+      chatgpt_plan_type: accessPayload?.["https://api.openai.com/auth"]?.chatgpt_plan_type,
+      chatgpt_user_id: accessPayload?.["https://api.openai.com/auth"]?.chatgpt_user_id,
+      user_id: accessPayload?.["https://api.openai.com/auth"]?.user_id,
+    },
+    email,
+  };
+
+  const cleanPayload = stripUnavailable(payload);
+  const header = encodeBase64Url(JSON.stringify({ alg: "none", typ: "JWT", cpa_synthetic: true }));
+  const encodedPayload = encodeBase64Url(JSON.stringify(cleanPayload));
+
+  return `${header}.${encodedPayload}.synthetic`;
 }
 
 function parseOpenAIRecord(record, options) {
@@ -505,14 +536,25 @@ function convertSub2ApiOpenAIAccount(account, options) {
   const now = options.now instanceof Date ? options.now : new Date();
   const accessToken = firstNonEmpty(credentials.access_token);
   const refreshToken = firstNonEmpty(credentials.refresh_token);
-  const idToken = firstNonEmpty(credentials.id_token);
+  let idToken = firstNonEmpty(credentials.id_token);
+  let idTokenSynthetic = false;
 
   if (!accessToken) {
     throw new Error("credentials.access_token 为空");
   }
 
+  // 如果 id_token 为空，自动生成
   if (!idToken) {
-    throw new Error("credentials.id_token 为空，无法生成 Codex CPA 文件");
+    const accessPayload = parseJwtPayload(accessToken);
+    const expiresAt = firstNonEmpty(
+      normalizeFlexibleTimestamp(credentials.expires_at),
+      accessPayload ? timestampFromUnixSeconds(accessPayload.exp) : undefined,
+      timestampFromNowPlusSeconds(credentials.expires_in, now),
+    );
+    const email = firstNonEmpty(extra.email, credentials.email);
+
+    idToken = generateSyntheticIdToken(accessPayload, expiresAt, email, now);
+    idTokenSynthetic = true;
   }
 
   const accessPayload = parseJwtPayload(accessToken);
@@ -536,6 +578,7 @@ function convertSub2ApiOpenAIAccount(account, options) {
       access_token: accessToken,
       refresh_token: refreshToken,
       id_token: idToken,
+      id_token_synthetic: idTokenSynthetic || undefined,
       account_id: firstNonEmpty(credentials.chatgpt_account_id),
       email,
       expired: expiresAt,
